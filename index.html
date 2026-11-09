@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ตรวจน้ำหนักห่อจากรูป</title>
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#faf9f5;--card:#fff;--tx:#1f1e1d;--mu:#6b6a68;--ac:#2f7d4f;--ac2:#fff;--bd:#e3e1da}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1f1e1d;--card:#2a2928;--tx:#f0eee6;--mu:#a09e98;--ac:#4fae77;--ac2:#10231a;--bd:#3d3b38;color-scheme:dark}}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,"Noto Sans Thai",sans-serif;line-height:1.5}
+main{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.4rem;margin:8px 0 4px}
+p.s{color:var(--mu);margin:0 0 16px;font-size:.95rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin-bottom:14px}
+.key-box{display:flex;gap:8px;margin-bottom:12px}
+.key-box input{flex:1;padding:10px 12px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--tx);font:inherit;font-size:.9rem}
+.drop{display:block;text-align:center;border:2px dashed var(--bd);border-radius:12px;padding:28px 12px;cursor:pointer;color:var(--mu)}
+input[type=file]{display:none}
+button{font:inherit;border:0;border-radius:10px;padding:12px 18px;background:var(--ac);color:var(--ac2);font-weight:600;width:100%;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button.g{background:transparent;color:var(--tx);border:1px solid var(--bd);margin-top:8px}
+#st{margin:10px 0 0;color:var(--mu);font-size:.9rem;min-height:1.2em}
+.tw{overflow-x:auto;margin-top:10px;border:1px solid var(--bd);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+td{border:1px solid var(--bd);padding:6px 8px;white-space:nowrap}
+tr:first-child td{font-weight:600;background:var(--bg)}
+#th{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+#th img{width:52px;height:52px;object-fit:cover;border-radius:6px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>ตรวจน้ำหนักห่อจากรูป</h1>
+<p class="s">เช็กน้ำหนักห่อ (รวมห่อ − ชั่ง) ปกติ 5.0–5.6 · สูงสุด 10 รูปต่อรอบ</p>
+
+<div class="card" id="up">
+  <div class="key-box">
+    <input id="apiKey" type="password" placeholder="วาง Gemini API Key (AIzaSy...)">
+  </div>
+  <label class="drop" id="drop">
+    <span id="hint">แตะเพื่อเลือกรูป (สูงสุด 10 รูปต่อรอบ)</span>
+    <input id="f" type="file" accept="image/*" multiple>
+  </label>
+  <div id="th"></div>
+  <div style="height:12px"></div>
+  <button id="go" disabled>ตรวจน้ำหนัก</button>
+  <div id="st"></div>
+</div>
+
+<div id="res" hidden>
+  <div id="tbs"></div>
+  <button id="dl">ดาวน์โหลดเป็น Excel (.xlsx)</button>
+  <button class="g" id="rs">เริ่มรอบใหม่</button>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let files=[], sheets=[];
+const LO=5.0, HI=5.6, TOL=0.2;
+
+// โหลด API Key ที่เคยบันทึกไว้ในเครื่อง
+$('apiKey').value = localStorage.getItem('gemini_api_key') || '';
+$('apiKey').oninput = () => {
+  localStorage.setItem('gemini_api_key', $('apiKey').value.trim());
+  updateBtn();
+};
+
+function updateBtn(){
+  $('go').disabled = !(files.length && $('apiKey').value.trim());
+}
+
+function chk(w,wp){
+  if(w==null||wp==null||w===''||wp===''||isNaN(+w)||isNaN(+wp)) return 'อ่านไม่ชัด';
+  const x=Math.round((+wp-+w)*100)/100;
+  let d=0,t='';
+  if(x>HI){d=x-HI;t='เกิน'}
+  else if(x<LO){d=LO-x;t='ขาด'}
+  d=Math.round(d*100)/100;
+  return d>TOL+1e-9?t+' '+d.toFixed(1):'';
+}
+
+const st=t=>$('st').textContent=t;
+
+async function shrinkBase64(file){
+  const u=URL.createObjectURL(file);
+  const im=new Image();
+  await new Promise((r,j)=>{im.onload=r;im.onerror=j;im.src=u});
+  const k=Math.min(1,2000/Math.max(im.width,im.height));
+  const c=document.createElement('canvas');
+  c.width=im.width*k; c.height=im.height*k;
+  c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg',0.9).split(',')[1];
+}
+
+async function askGemini(base64, key){
+  const prompt = 'ในรูปมีตารางรายงาน ให้อ่านข้อมูลทีละลำดับ ตอบเป็น JSON เท่านั้น: อาร์เรย์ของวัตถุ หนึ่งวัตถุต่อหนึ่งลำดับ รูปแบบ [{"seq":"ลำดับ","no":"เลขที่","w":ตัวเลข,"wp":ตัวเลข}] โดย w คือคอลัมน์ น.น.ชั่ง และ wp คือตัวเลขเขียนมือในคอลัมน์ น.น.ชั่งรวมห่อ กฎ: (1) ถ้าลำดับนั้นมีหลายบรรทัด (หลายชิ้น) บรรทัดล่างสุดคือยอดรวมที่รวมมาให้แล้ว ให้ใช้ w และ wp ของบรรทัดล่างสุดเท่านั้น ไม่ใช้บรรทัดย่อย (2) ถ้ามีเลขเขียนมือแก้ค่า น.น.ชั่ง (เช่นวงกลมแล้วเขียนค่าใหม่ข้างล่าง) ให้ใช้ค่าที่แก้ (3) ถ้าไม่มีเลขเขียนมือในช่อง น.น.ชั่งรวมห่อ ให้ wp เป็น null ห้ามมีคำอธิบายหรือ markdown';
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      contents: [{parts: [{text: prompt}, {inline_data: {mime_type: 'image/jpeg', data: base64}}]}],
+      generationConfig: {responseMimeType: "application/json"}
+    })
+  });
+  if(!res.ok) throw new Error('API Error');
+  const data = await res.json();
+  const txt = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+  return JSON.parse(txt);
+}
+
+$('f').onchange=e=>{
+  const all=[...e.target.files];
+  files=all.slice(0,10);
+  $('th').innerHTML='';
+  files.forEach(f=>{
+    const i=document.createElement('img');
+    i.src=URL.createObjectURL(f);
+    $('th').appendChild(i);
+  });
+  $('hint').textContent=files.length?('เลือกแล้ว '+files.length+' รูป (แตะเพื่อเปลี่ยน)'):'แตะเพื่อเลือกรูป (สูงสุด 10 รูปต่อรอบ)';
+  st(all.length>10?'เลือกเกิน 10 รูป ใช้เฉพาะ 10 รูปแรก':'');
+  updateBtn();
+  $('res').hidden=true;
+};
+
+$('go').onclick=async()=>{
+  const key = $('apiKey').value.trim();
+  if(!files.length||!key) return;
+  $('go').disabled=true;
+  sheets=[]; let fail=0;
+
+  for(let n=0;n<files.length;n++){
+    st('กำลังอ่านรูป '+(n+1)+'/'+files.length+'...');
+    try{
+      const b64=await shrinkBase64(files[n]);
+      const out=await askGemini(b64, key);
+      if(!Array.isArray(out)||!out.length) throw 0;
+      const rows=[['ลำดับ','เลขที่','น.น.ชั่ง','น.น.ชั่งรวมห่อ','เกิน / ขาด']];
+      const f1=v=>v==null||v===''||isNaN(+v)?'':(+v).toFixed(1);
+      let skip=0;
+      out.forEach(o=>{
+        if(o.wp==null||o.wp===''){skip++;return}
+        const m=chk(o.w,o.wp);
+        if(m) rows.push([o.seq==null?'':String(o.seq),o.no==null?'':String(o.no),f1(o.w),f1(o.wp),m]);
+      });
+      sheets.push({n:n+1,rows,total:out.length,skip});
+    }catch(e){
+      fail++;
+    }
+  }
+
+  updateBtn();
+  if(sheets.length){
+    const M={n:1,rows:[sheets[0].rows[0]],total:0,skip:0};
+    sheets.forEach(sh=>{
+      M.rows.push(...sh.rows.slice(1));
+      M.total+=sh.total;
+      M.skip+=sh.skip;
+    });
+    const k=r=>parseFloat(r[0]);
+    M.rows=[M.rows[0]].concat(
+      M.rows.slice(1).map((r,i)=>[r,i]).sort((a,b)=>{
+        const x=k(a[0]),y=k(b[0]);
+        return(isNaN(x)||isNaN(y)||x===y)?a[1]-b[1]:x-y;
+      }).map(e=>e[0])
+    );
+    sheets=[M];
+  }
+
+  if(!sheets.length){
+    st('อ่านรูปไม่สำเร็จ ตรวจสอบ API Key หรือลองรูปที่ชัดขึ้นอีกครั้ง');
+    return;
+  }
+
+  $('tbs').innerHTML='';
+  sheets.forEach(sh=>{
+    const d=document.createElement('div'); d.className='card';
+    const b=document.createElement('b');
+    b.textContent='ผิดปกติ '+(sh.rows.length-1)+' จาก '+sh.total+' ลำดับ'+(sh.skip?' · ยังไม่มีน.น.รวมห่อ '+sh.skip+' ลำดับ':'');
+    d.appendChild(b);
+    const w=document.createElement('div'); w.className='tw';
+    const t=document.createElement('table');
+    sh.rows.forEach(r=>{
+      const tr=t.insertRow();
+      r.forEach(v=>tr.insertCell().textContent=v);
+    });
+    w.appendChild(t); d.appendChild(w);
+    $('tbs').appendChild(d);
+  });
+
+  $('up').hidden=true; $('res').hidden=false;
+  if(fail){
+    const p=document.createElement('p'); p.className='s';
+    p.textContent='อ่านไม่สำเร็จ '+fail+' รูป';
+    $('tbs').prepend(p);
+  }
+  window.scrollTo({top:0});
+};
+
+$('dl').onclick=()=>{
+  if(!sheets.length) return;
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(sheets[0].rows);
+  XLSX.utils.book_append_sheet(wb, ws, "รายการผิดปกติ");
+  XLSX.writeFile(wb, "ตรวจน้ำหนักห่อ.xlsx");
+};
+
+$('rs').onclick=()=>{
+  files=[]; sheets=[]; $('f').value=''; $('th').innerHTML='';
+  $('hint').textContent='แตะเพื่อเลือกรูป (สูงสุด 10 รูปต่อรอบ)';
+  st(''); updateBtn(); $('res').hidden=true; $('up').hidden=false;
+};
+</script>
+</main>
+</body>
+</html>
